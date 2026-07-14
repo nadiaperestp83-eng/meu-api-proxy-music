@@ -32,7 +32,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ytmusic = YTMusic()
+# Configuração do User-Agent para simular um navegador real e evitar bloqueios
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+ytmusic = YTMusic(user_agent=USER_AGENT)
 
 EMPTY_STREAM_RESULT = {
     "playable": False,
@@ -44,10 +46,6 @@ EMPTY_STREAM_RESULT = {
 # ============================================================
 #  CACHE EM MEMÓRIA (TTL curto) PARA URLS DE STREAMING
 # ============================================================
-# As URLs do googlevideo.com costumam expirar em poucas horas.
-# Usamos um TTL conservador de 5h para não servir link expirado,
-# e para reduzir chamadas repetidas ao YouTube (economiza tempo
-# de resposta e reduz o risco de rate limit).
 _STREAM_CACHE: dict[str, dict] = {}
 _STREAM_TTL_SECONDS = 5 * 60 * 60  # 5 horas
 
@@ -73,17 +71,12 @@ def _cache_set(video_id: str, data: dict) -> None:
 #  HELPERS DE NORMALIZAÇÃO
 # ============================================================
 def _safe_thumbnails(thumbnails) -> list:
-    """Garante que sempre haja pelo menos 1 thumbnail (o app quebra em
-    thumbnails[0] se a lista vier vazia)."""
     if thumbnails:
         return thumbnails
     return [{"url": "", "width": 0, "height": 0}]
 
 
 def _audio_json_from_format(fmt: dict) -> dict:
-    """Converte um item de `streamingData.adaptiveFormats` (formato cru
-    do youtubei/v1/player) para o shape que o Dart `Audio.fromJson`
-    espera (ver lib/services/stream_service.dart e hm_streaming_data.dart)."""
     mime = fmt.get("mimeType", "")
     return {
         "itag": fmt.get("itag", 0),
@@ -97,11 +90,6 @@ def _audio_json_from_format(fmt: dict) -> dict:
 
 
 def _pick_best_format(adaptive_formats: list, itag_priority: list[int]) -> Optional[dict]:
-    """Só aceita formatos que já vêm com `url` direta (sem `signatureCipher`).
-    Decifrar o `signatureCipher` exige rodar o JS do player do YouTube, o
-    que este servidor propositalmente NÃO faz (mantém o proxy leve). Quando
-    só existe `signatureCipher`, devolvemos None e o app cai no fallback
-    local (youtube_explode_dart, que sabe decifrar)."""
     audio_only = [
         f for f in adaptive_formats
         if str(f.get("mimeType", "")).startswith("audio/") and f.get("url")
@@ -252,11 +240,6 @@ async def get_lyrics(browseId: str = Query(...)):
         return {"lyrics": None, "source": None}
 
 
-# ------------------------------------------------------------------
-# ÚNICO endpoint relacionado a streaming. Devolve SOMENTE a URL
-# direta do googlevideo.com (+ metadados leves de itag/bitrate).
-# O áudio em si NUNCA passa por este servidor.
-# ------------------------------------------------------------------
 @app.get("/get_song_url")
 async def get_song_url(videoId: str = Query(...)):
     cached = _cache_get(videoId)
@@ -269,8 +252,6 @@ async def get_song_url(videoId: str = Query(...)):
         status = playability.get("status", "UNKNOWN")
 
         if status != "OK":
-            # Não cacheamos falhas: o app deve tentar de novo ou usar o
-            # fallback local (youtube_explode_dart) imediatamente.
             return {
                 "playable": False,
                 "statusMSG": playability.get("reason", status),
@@ -283,9 +264,6 @@ async def get_song_url(videoId: str = Query(...)):
         low = _pick_best_format(adaptive_formats, itag_priority=[249, 139]) or high
 
         if high is None:
-            # Só existem formatos com signatureCipher (assinatura cifrada).
-            # Decifrar exigiria rodar o JS do player -> fora do escopo
-            # deste proxy leve. O app deve cair no fallback local.
             return {
                 "playable": False,
                 "statusMSG": "cipher_required_use_fallback",
